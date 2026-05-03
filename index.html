@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>台大 × 大吸館：校園大滿貫任務</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        :root { --ntu-red: #8B0000; --gold: #D4AF37; }
+        body { font-family: "PingFang TC", sans-serif; margin: 0; background: #f4f4f4; overflow: hidden; }
+        header { background: var(--ntu-red); color: white; padding: 15px; text-align: center; font-weight: bold; position: relative; z-index: 1000; }
+        #map { width: 100%; height: 50vh; border-bottom: 2px solid #ccc; }
+        .red-marker { filter: hue-rotate(140deg) brightness(0.9); }
+        
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 2000; justify-content: center; align-items: center; }
+        .modal-content { background: white; width: 85%; max-width: 380px; border-radius: 25px; padding: 30px; text-align: center; position: relative; }
+        
+        .btn-main { background: var(--ntu-red); color: white; border: none; padding: 16px; border-radius: 35px; width: 100%; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 15px; }
+        .barcode-box { background: #f0f0f0; border: 2px dashed #999; padding: 15px; margin: 15px 0; font-family: monospace; font-size: 20px; letter-spacing: 2px; }
+        
+        #camera-trigger { display: none; }
+        #test-btn { position: fixed; bottom: 10px; right: 10px; font-size: 10px; padding: 5px; opacity: 0.5; z-index: 3000; }
+    </style>
+</head>
+<body>
+
+<header>大吸館：校園有料靈魂地圖</header>
+<div id="map"></div>
+
+<!-- 1. 入口對話框 -->
+<div class="modal" id="modal-welcome" style="display:flex;">
+    <div class="modal-content">
+        <h2>有料地圖啟動！</h2>
+        <p style="font-size: 18px; font-weight: bold;">來指定通路拍照拿取優惠券</p>
+        <button class="btn-main" onclick="confirmQuest()">按確認開始任務</button>
+    </div>
+</div>
+
+<!-- 2. 拍照啟動器 -->
+<div class="modal" id="modal-camera">
+    <div class="modal-content">
+        <div style="font-size: 50px; margin-bottom: 10px;">📸</div>
+        <h3 id="target-name" style="color:var(--ntu-red); margin:0;"></h3>
+        <p>已抵達通路！請立即拍照認證。</p>
+        <button class="btn-main" onclick="openCamera()">啟動鏡頭拍照</button>
+    </div>
+</div>
+
+<!-- 3. 優惠券條碼彈窗 -->
+<div class="modal" id="modal-coupon">
+    <div class="modal-content">
+        <h3 id="coupon-title">恭喜獲得優惠！</h3>
+        <p id="coupon-desc"></p>
+        <div class="barcode-box" id="barcode-text">LOADING...</div>
+        <button class="btn-main" onclick="closeRewardModal()">領取完成，繼續搜集</button>
+    </div>
+</div>
+
+<!-- 4. 最終人生三格 -->
+<div class="modal" id="modal-final">
+    <div class="modal-content">
+        <h2 style="color:var(--ntu-red);">🌟 搜集大滿貫！</h2>
+        <p>你的校園人生三格已產出</p>
+        <canvas id="strip-canvas" style="width:180px; border:5px solid white; box-shadow: 0 4px 15px rgba(0,0,0,0.3);"></canvas>
+        <button class="btn-main" style="background:#E1306C;" onclick="location.href='https://instagram.com/'">上傳 IG 分享</button>
+    </div>
+</div>
+
+<!-- 強制拍照 Input -->
+<input type="file" id="camera-trigger" accept="image/*" capture="camera">
+
+<button id="test-btn" onclick="toggleTest()">測試模式: OFF</button>
+
+<script>
+    const locations = {
+        seven: { lat: 25.0137, lng: 121.5363, name: "7-11 卓聯門市", reward: "第2件8折" },
+        family: { lat: 25.0191, lng: 121.5422, name: "全家 台大楓林店", reward: "兩件88折" },
+        coop: { lat: 25.0176, lng: 121.5372, name: "台大合作社", reward: "第2件加15元多1件" }
+    };
+
+    let map = L.map('map').setView([25.0175, 121.5397], 15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    let state = { active: false, collected: {seven:false, family:false, coop:false}, photos:[], isTest: false };
+
+    // 放置標記 (紅標)
+    Object.keys(locations).forEach(key => {
+        const l = locations[key];
+        let m = L.marker([l.lat, l.lng]).addTo(map);
+        m._icon.classList.add('red-marker');
+        m.bindPopup(`<b>${l.name}</b>`);
+    });
+
+    function confirmQuest() {
+        state.active = true;
+        closeModal('modal-welcome');
+        const h = new Date().getHours();
+        if (h >= 21 || h < 5) alert("🌙 夜貓子獎勵：已額外發放 7-11 優惠至您的帳戶！");
+    }
+
+    map.locate({watch: true, enableHighAccuracy: true});
+    map.on('locationfound', e => {
+        if (!state.active) return;
+        const u = e.latlng;
+        for (let key in state.collected) {
+            // 如果該站尚未搜集，且距離小於 50m
+            if (!state.collected[key]) {
+                const loc = locations[key];
+                if (map.distance(u, [loc.lat, loc.lng]) < 50 || state.isTest) {
+                    triggerCameraUI(key);
+                    break;
+                }
+            }
+        }
+    });
+
+    function triggerCameraUI(key) {
+        window.currentKey = key;
+        document.getElementById('target-name').innerText = locations[key].name;
+        showModal('modal-camera');
+    }
+
+    function openCamera() { document.getElementById('camera-trigger').click(); }
+
+    // 處理相機拍照後動作
+    document.getElementById('camera-trigger').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                state.photos.push(ev.target.result);
+                state.collected[window.currentKey] = true;
+                closeModal('modal-camera');
+                
+                // 展示優惠條碼
+                const loc = locations[window.currentKey];
+                document.getElementById('coupon-desc').innerText = `已完成「${loc.name}」認證，獲得：${loc.reward}`;
+                document.getElementById('barcode-text').innerText = "TAISUN-" + Math.random().toString(36).substr(2, 6).toUpperCase();
+                showModal('modal-coupon');
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    function closeRewardModal() {
+        closeModal('modal-coupon');
+        // 檢查是否滿三站
+        const count = Object.values(state.collected).filter(v => v).length;
+        if (count === 3) generateStrip();
+    }
+
+    function generateStrip() {
+        const canvas = document.getElementById('strip-canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 300; canvas.height = 700;
+        ctx.fillStyle = "white"; ctx.fillRect(0,0,300,700);
+        
+        let loaded = 0;
+        state.photos.slice(0,3).forEach((src, i) => {
+            const img = new Image();
+            img.onload = () => {
+                ctx.drawImage(img, 20, 20 + (i * 220), 260, 200);
+                loaded++;
+                if (loaded === 3) {
+                    ctx.fillStyle = "#8B0000"; ctx.font = "bold 20px Arial";
+                    ctx.fillText("台大 × 大吸館 有料三格", 45, 680);
+                    showModal('modal-final');
+                }
+            };
+            img.src = src;
+        });
+    }
+
+    function showModal(id) { document.getElementById(id).style.display = 'flex'; }
+    function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+    function toggleTest() { 
+        state.isTest = !state.isTest; 
+        document.getElementById('test-btn').innerText = `測試模式: ${state.isTest ? 'ON' : 'OFF'}`;
+    }
+</script>
+</body>
+</html>
